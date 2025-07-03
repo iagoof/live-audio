@@ -4,31 +4,37 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {GoogleGenAI, LiveServerMessage, Modality, Session} from '@google/genai';
+import {GoogleGenAI, Chat} from '@google/genai';
 import {LitElement, css, html} from 'lit';
 import {customElement, state} from 'lit/decorators.js';
-import {createBlob, decode, decodeAudioData} from './utils';
 import './visual-3d';
+
+// Adiciona os tipos para as APIs de reconhecimento de fala do navegador
+declare global {
+  interface Window {
+    SpeechRecognition: any;
+    webkitSpeechRecognition: any;
+  }
+}
 
 @customElement('gdm-live-audio')
 export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
-  @state() status = '';
+  @state() isSpeaking = false;
+  @state() isThinking = false;
+  @state() status = 'Conectado. Clique para falar.';
   @state() error = '';
 
   private client: GoogleGenAI;
-  private session: Session;
+  private chat: Chat;
+  private recognition: any; // Instância do SpeechRecognition
+
   private inputAudioContext = new ((window as any).AudioContext ||
     (window as any).webkitAudioContext)({sampleRate: 16000});
-  private outputAudioContext = new ((window as any).AudioContext ||
-    (window as any).webkitAudioContext)({sampleRate: 24000});
   @state() inputNode = this.inputAudioContext.createGain();
-  @state() outputNode = this.outputAudioContext.createGain();
-  private nextStartTime = 0;
+
   private mediaStream: MediaStream;
-  private sourceNode: AudioBufferSourceNode;
-  private scriptProcessorNode: ScriptProcessorNode;
-  private sources = new Set<AudioBufferSourceNode>();
+  private sourceNode: MediaStreamAudioSourceNode;
 
   static styles = css`
     #status {
@@ -38,6 +44,8 @@ export class GdmLiveAudio extends LitElement {
       right: 0;
       z-index: 10;
       text-align: center;
+      color: white;
+      font-family: sans-serif;
     }
 
     .controls {
@@ -64,13 +72,21 @@ export class GdmLiveAudio extends LitElement {
         font-size: 24px;
         padding: 0;
         margin: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
 
         &:hover {
           background: rgba(255, 255, 255, 0.2);
         }
+
+        &:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
       }
 
-      button[disabled] {
+      button.hidden {
         display: none;
       }
     }
@@ -79,92 +95,163 @@ export class GdmLiveAudio extends LitElement {
   constructor() {
     super();
     this.initClient();
-  }
-
-  private initAudio() {
-    this.nextStartTime = this.outputAudioContext.currentTime;
+    this.initSpeechRecognition();
   }
 
   private async initClient() {
-    this.initAudio();
-
     this.client = new GoogleGenAI({
       apiKey: process.env.API_KEY,
     });
-
-    this.outputNode.connect(this.outputAudioContext.destination);
-
-    this.initSession();
+    this.initChat();
   }
 
-  private async initSession() {
-    const model = 'gemini-2.5-flash-preview-native-audio-dialog';
+  private initChat() {
+    this.chat = this.client.chats.create({
+      model: 'gemini-2.5-flash-preview-04-17',
+      config: {
+        systemInstruction: {
+          parts: [
+            {
+              text: 'Você é um psicólogo brasileiro. Fale de maneira calma, empática e acolhedora. Use o português do Brasil. Suas respostas devem ser concisas.',
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  private initSpeechRecognition() {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      this.updateError('API de Reconhecimento de Fala não suportada neste navegador.');
+      return;
+    }
+    this.recognition = new SpeechRecognition();
+    this.recognition.lang = 'pt-BR';
+    this.recognition.continuous = true;
+    this.recognition.interimResults = false;
+
+    this.recognition.onstart = () => {
+      this.isRecording = true;
+      this.updateStatus('Ouvindo...');
+    };
+
+    this.recognition.onresult = async (event: any) => {
+      let finalTranscript = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        }
+      }
+      if (finalTranscript) {
+        this.stopRecording();
+        await this.sendTextToGemini(finalTranscript.trim());
+      }
+    };
+
+    this.recognition.onend = () => {
+      this.isRecording = false;
+      if (!this.isThinking && !this.isSpeaking) {
+        this.updateStatus('Conectado. Clique para falar.');
+      }
+    };
+
+    this.recognition.onerror = (event: any) => {
+      this.updateError(`Erro no reconhecimento: ${event.error}`);
+      this.isRecording = false;
+    };
+  }
+
+  private async sendTextToGemini(text: string) {
+    if (!text) return;
+    try {
+      this.isThinking = true;
+      this.updateStatus('Pensando...');
+      const response = await this.chat.sendMessage({message: text});
+      this.isThinking = false;
+      this.speakResponse(response.text);
+    } catch (e) {
+      this.isThinking = false;
+      this.updateError(e.message);
+      this.updateStatus('Erro. Tente novamente.');
+    }
+  }
+
+  private speakResponse(text: string) {
+    if (!text || !window.speechSynthesis) {
+      this.updateStatus('Pronto.');
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = 'pt-BR';
+
+    utterance.onstart = () => {
+      this.isSpeaking = true;
+      this.updateStatus('Falando...');
+    };
+
+    utterance.onend = () => {
+      this.isSpeaking = false;
+      this.updateStatus('Conectado. Clique para falar.');
+    };
+
+    utterance.onerror = (e) => {
+      this.isSpeaking = false;
+      this.updateError(`Erro na fala: ${e.error}`);
+      this.updateStatus('Erro. Tente novamente.');
+    };
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  private async startRecording() {
+    if (this.isRecording) {
+      return;
+    }
+
+    this.error = '';
 
     try {
-      this.session = await this.client.live.connect({
-        model: model,
-        callbacks: {
-          onopen: () => {
-            this.updateStatus('Conectado');
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            const audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData;
-
-            if (audio) {
-              this.nextStartTime = Math.max(
-                this.nextStartTime,
-                this.outputAudioContext.currentTime,
-              );
-
-              const audioBuffer = await decodeAudioData(
-                decode(audio.data),
-                this.outputAudioContext,
-                24000,
-                1,
-              );
-              const source = this.outputAudioContext.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(this.outputNode);
-              source.addEventListener('ended', () =>{
-                this.sources.delete(source);
-              });
-
-              source.start(this.nextStartTime);
-              this.nextStartTime = this.nextStartTime + audioBuffer.duration;
-              this.sources.add(source);
-            }
-
-            const interrupted = message.serverContent?.interrupted;
-            if(interrupted) {
-              for(const source of this.sources.values()) {
-                source.stop();
-                this.sources.delete(source);
-              }
-              this.nextStartTime = 0;
-            }
-          },
-          onerror: (e: ErrorEvent) => {
-            this.updateError(e.message);
-          },
-          onclose: (e: CloseEvent) => {
-            this.updateStatus('Desconectado: ' + e.reason);
-          },
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {prebuiltVoiceConfig: {voiceName: 'Orus'}},
-            languageCode: 'pt-BR'
-          },
-          systemInstruction: {
-            parts: [{ text: 'Você é um psicólogo brasileiro. Fale de maneira calma, empática e acolhedora. Use o português do Brasil.' }]
-          }
-        },
+      this.mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
       });
-    } catch (e) {
-      console.error(e);
+
+      this.inputAudioContext.resume();
+      this.sourceNode = this.inputAudioContext.createMediaStreamSource(
+        this.mediaStream,
+      );
+      this.sourceNode.connect(this.inputNode);
+      this.recognition.start();
+    } catch (err) {
+      console.error('Erro ao iniciar a gravação:', err);
+      this.updateError(`Erro no microfone: ${err.message}`);
     }
+  }
+
+  private stopRecording() {
+    if (!this.isRecording) return;
+    this.recognition.stop();
+    this.isRecording = false;
+
+    if (this.sourceNode) {
+      this.sourceNode.disconnect();
+    }
+
+    if (this.mediaStream) {
+      this.mediaStream.getTracks().forEach((track) => track.stop());
+      this.mediaStream = null;
+    }
+    this.updateStatus('Processando...');
+  }
+
+  private reset() {
+    if(this.isRecording) this.stopRecording();
+    if(this.isSpeaking) window.speechSynthesis.cancel();
+    this.initChat();
+    this.updateStatus('Sessão reiniciada.');
   }
 
   private updateStatus(msg: string) {
@@ -173,96 +260,18 @@ export class GdmLiveAudio extends LitElement {
 
   private updateError(msg: string) {
     this.error = msg;
-  }
-
-  private async startRecording() {
-    if (this.isRecording) {
-      return;
-    }
-
-    this.inputAudioContext.resume();
-
-    this.updateStatus('Solicitando acesso ao microfone...');
-
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
-
-      this.updateStatus('Acesso ao microfone concedido. Iniciando captura...');
-
-      this.sourceNode = this.inputAudioContext.createMediaStreamSource(
-        this.mediaStream,
-      );
-      this.sourceNode.connect(this.inputNode);
-
-      const bufferSize = 256;
-      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(
-        bufferSize,
-        1,
-        1,
-      );
-
-      this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
-        if (!this.isRecording) return;
-
-        const inputBuffer = audioProcessingEvent.inputBuffer;
-        const pcmData = inputBuffer.getChannelData(0);
-
-        this.session.sendRealtimeInput({media: createBlob(pcmData)});
-      };
-
-      this.sourceNode.connect(this.scriptProcessorNode);
-      this.scriptProcessorNode.connect(this.inputAudioContext.destination);
-
-      this.isRecording = true;
-      this.updateStatus('🔴 Gravando... Fale agora.');
-    } catch (err) {
-      console.error('Error starting recording:', err);
-      this.updateStatus(`Erro: ${err.message}`);
-      this.stopRecording();
-    }
-  }
-
-  private stopRecording() {
-    if (!this.isRecording && !this.mediaStream && !this.inputAudioContext)
-      return;
-
-    this.updateStatus('Parando a gravação...');
-
-    this.isRecording = false;
-
-    if (this.scriptProcessorNode && this.sourceNode && this.inputAudioContext) {
-      this.scriptProcessorNode.disconnect();
-      this.sourceNode.disconnect();
-    }
-
-    this.scriptProcessorNode = null;
-    this.sourceNode = null;
-
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((track) => track.stop());
-      this.mediaStream = null;
-    }
-
-    this.updateStatus('Gravação parada. Clique no botão vermelho para começar de novo.');
-  }
-
-  private reset() {
-    this.session?.close();
-    this.initSession();
-    this.updateStatus('Sessão reiniciada.');
+    console.error(msg);
   }
 
   render() {
+    const isBusy = this.isThinking || this.isSpeaking;
     return html`
       <div>
         <div class="controls">
           <button
             id="resetButton"
             @click=${this.reset}
-            ?disabled=${this.isRecording}>
+            ?disabled=${this.isRecording || isBusy}>
             <svg
               xmlns="http://www.w3.org/2000/svg"
               height="40px"
@@ -275,8 +284,9 @@ export class GdmLiveAudio extends LitElement {
           </button>
           <button
             id="startButton"
+            class=${this.isRecording ? 'hidden' : ''}
             @click=${this.startRecording}
-            ?disabled=${this.isRecording}>
+            ?disabled=${isBusy}>
             <svg
               viewBox="0 0 100 100"
               width="32px"
@@ -288,8 +298,8 @@ export class GdmLiveAudio extends LitElement {
           </button>
           <button
             id="stopButton"
-            @click=${this.stopRecording}
-            ?disabled=${!this.isRecording}>
+            class=${!this.isRecording ? 'hidden' : ''}
+            @click=${this.stopRecording}>
             <svg
               viewBox="0 0 100 100"
               width="32px"
@@ -304,7 +314,7 @@ export class GdmLiveAudio extends LitElement {
         <div id="status"> ${this.error ? this.error : this.status} </div>
         <gdm-live-audio-visuals-3d
           .inputNode=${this.inputNode}
-          .outputNode=${this.outputNode}></gdm-live-audio-visuals-3d>
+          .isSpeaking=${this.isSpeaking}></gdm-live-audio-visuals-3d>
       </div>
     `;
   }

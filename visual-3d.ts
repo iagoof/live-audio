@@ -27,7 +27,6 @@ import {vs as sphereVS} from './sphere-shader';
 @customElement('gdm-live-audio-visuals-3d')
 export class GdmLiveAudioVisuals3D extends LitElement {
   private inputAnalyser!: Analyser;
-  private outputAnalyser!: Analyser;
   private camera!: THREE.PerspectiveCamera;
   private backdrop!: THREE.Mesh;
   private composer!: EffectComposer;
@@ -35,17 +34,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
   private prevTime = 0;
   private rotation = new THREE.Vector3(0, 0, 0);
 
-  private _outputNode!: AudioNode;
-
-  @property()
-  set outputNode(node: AudioNode) {
-    this._outputNode = node;
-    this.outputAnalyser = new Analyser(this._outputNode);
-  }
-
-  get outputNode() {
-    return this._outputNode;
-  }
+  @property({type: Boolean}) isSpeaking = false;
 
   private _inputNode!: AudioNode;
 
@@ -189,8 +178,8 @@ export class GdmLiveAudioVisuals3D extends LitElement {
   private animation() {
     requestAnimationFrame(() => this.animation());
 
+    if (!this.inputAnalyser) return;
     this.inputAnalyser.update();
-    this.outputAnalyser.update();
 
     const t = performance.now();
     const dt = (t - this.prevTime) / (1000 / 60);
@@ -201,15 +190,29 @@ export class GdmLiveAudioVisuals3D extends LitElement {
     backdropMaterial.uniforms.rand.value = Math.random() * 10000;
 
     if (sphereMaterial.userData.shader) {
-      this.sphere.scale.setScalar(
-        1 + (0.2 * this.outputAnalyser.data[1]) / 255,
-      );
+      let outputDataArr = [0, 0, 0];
+      if (this.isSpeaking) {
+        // Fake the output data for visualization
+        const time = t * 0.005;
+        outputDataArr = [
+          Math.sin(time) * 0.5 + 0.5,
+          Math.cos(time * 0.7) * 0.5 + 0.5,
+          Math.sin(time * 1.3) * 0.5 + 0.5,
+        ];
+        this.sphere.scale.setScalar(1 + 0.2 * outputDataArr[0]);
+      } else {
+        this.sphere.scale.setScalar(1);
+      }
 
       const f = 0.001;
-      this.rotation.x += (dt * f * 0.5 * this.outputAnalyser.data[1]) / 255;
+      // Input drives some rotation
       this.rotation.z += (dt * f * 0.5 * this.inputAnalyser.data[1]) / 255;
       this.rotation.y += (dt * f * 0.25 * this.inputAnalyser.data[2]) / 255;
-      this.rotation.y += (dt * f * 0.25 * this.outputAnalyser.data[2]) / 255;
+
+      // Output also drives rotation
+      this.rotation.x += dt * f * 0.5 * outputDataArr[1];
+      this.rotation.y += dt * f * 0.25 * outputDataArr[2];
+
 
       const euler = new THREE.Euler(
         this.rotation.x,
@@ -223,7 +226,8 @@ export class GdmLiveAudioVisuals3D extends LitElement {
       this.camera.lookAt(this.sphere.position);
 
       sphereMaterial.userData.shader.uniforms.time.value +=
-        (dt * 0.1 * this.outputAnalyser.data[0]) / 255;
+        (dt * 0.1 * outputDataArr[0]);
+
       sphereMaterial.userData.shader.uniforms.inputData.value.set(
         (1 * this.inputAnalyser.data[0]) / 255,
         (0.1 * this.inputAnalyser.data[1]) / 255,
@@ -231,9 +235,9 @@ export class GdmLiveAudioVisuals3D extends LitElement {
         0,
       );
       sphereMaterial.userData.shader.uniforms.outputData.value.set(
-        (2 * this.outputAnalyser.data[0]) / 255,
-        (0.1 * this.outputAnalyser.data[1]) / 255,
-        (10 * this.outputAnalyser.data[2]) / 255,
+        (2 * outputDataArr[0]),
+        (0.1 * outputDataArr[1]),
+        (10 * outputDataArr[2]),
         0,
       );
     }
