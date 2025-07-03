@@ -22,7 +22,7 @@ export class GdmLiveAudio extends LitElement {
   @state() isRecording = false;
   @state() isSpeaking = false;
   @state() isThinking = false;
-  @state() status = 'Conectado. Clique para falar.';
+  @state() status = 'Conectando...';
   @state() error = '';
 
   private client: GoogleGenAI;
@@ -98,33 +98,42 @@ export class GdmLiveAudio extends LitElement {
     this.initSpeechRecognition();
   }
 
-  private async initClient() {
-    this.client = new GoogleGenAI({
-      apiKey: process.env.API_KEY,
-    });
-    this.initChat();
+  private initClient() {
+    try {
+      this.client = new GoogleGenAI({
+        apiKey: process.env.API_KEY,
+      });
+      this.initChat();
+      if (this.chat) {
+        this.updateStatus('Conectado. Clique para falar.');
+      }
+    } catch (e) {
+      this.updateError(`Falha ao inicializar: ${e.message}`);
+    }
   }
 
   private initChat() {
-    this.chat = this.client.chats.create({
-      model: 'gemini-2.5-flash-preview-04-17',
-      config: {
-        systemInstruction: {
-          parts: [
-            {
-              text: 'Você é um psicólogo brasileiro. Fale de maneira calma, empática e acolhedora. Use o português do Brasil. Suas respostas devem ser concisas.',
-            },
-          ],
+    try {
+      this.chat = this.client.chats.create({
+        model: 'gemini-2.5-flash-preview-04-17',
+        config: {
+          systemInstruction:
+            'Você é um psicólogo brasileiro. Fale de maneira calma, empática e acolhedora. Use o português do Brasil. Suas respostas devem ser concisas.',
         },
-      },
-    });
+      });
+    } catch (e) {
+      this.chat = undefined;
+      this.updateError(`Falha ao criar o chat: ${e.message}`);
+    }
   }
 
   private initSpeechRecognition() {
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      this.updateError('API de Reconhecimento de Fala não suportada neste navegador.');
+      this.updateError(
+        'API de Reconhecimento de Fala não suportada neste navegador.',
+      );
       return;
     }
     this.recognition = new SpeechRecognition();
@@ -165,6 +174,13 @@ export class GdmLiveAudio extends LitElement {
 
   private async sendTextToGemini(text: string) {
     if (!text) return;
+
+    if (!this.chat) {
+      this.updateError('Chat não iniciado. Por favor, reinicie.');
+      this.updateStatus('Erro. Tente reiniciar.');
+      return;
+    }
+
     try {
       this.isThinking = true;
       this.updateStatus('Pensando...');
@@ -248,8 +264,8 @@ export class GdmLiveAudio extends LitElement {
   }
 
   private reset() {
-    if(this.isRecording) this.stopRecording();
-    if(this.isSpeaking) window.speechSynthesis.cancel();
+    if (this.isRecording) this.stopRecording();
+    if (this.isSpeaking) window.speechSynthesis.cancel();
     this.initChat();
     this.updateStatus('Sessão reiniciada.');
   }
@@ -286,7 +302,7 @@ export class GdmLiveAudio extends LitElement {
             id="startButton"
             class=${this.isRecording ? 'hidden' : ''}
             @click=${this.startRecording}
-            ?disabled=${isBusy}>
+            ?disabled=${isBusy || !this.chat}>
             <svg
               viewBox="0 0 100 100"
               width="32px"
